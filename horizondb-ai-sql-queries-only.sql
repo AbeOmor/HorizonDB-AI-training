@@ -16,6 +16,46 @@ FROM pg_extension
 WHERE extname IN ('vector', 'pg_diskann', 'pg_textsearch', 'pg_durable', 'azure_ai')
 ORDER BY extname;
 
+---====================================================
+-- ## Part 1B: Register custom models in AIMM (Optional)
+---====================================================
+
+-- Register a custom model from Microsoft Foundry
+
+SELECT model_registry.model_add(
+    'gpt-5-byom',                                       -- model alias
+    'https://abes-demo-ai-foundry.openai.azure.com/openai/v1',      -- model endpoint
+    'gpt-5.4',                                 -- deployment name
+    'gpt-5.4',                                            -- model name
+    NULL,                               -- API version
+    'subscription-key',                                 -- auth type
+    '<key>'                               -- endpoint key
+);
+
+-- Register a custom embedding model
+
+SELECT model_registry.model_add(
+    'text-embedding-3-small-byom',                      -- model alias
+    'https://abes-demo-ai-foundry.openai.azure.com/openai/v1',      -- model endpoint
+    'text-embedding-3-small',                -- deployment name
+    'text-embedding-3-small',                           -- model name
+    NULL,                               -- API version
+    'subscription-key',                                 -- auth type
+    '<key>'                               -- endpoint key
+);
+
+-- Register a reranking embedding model
+
+SELECT model_registry.model_add(
+    'reranker-byom',                      -- model alias
+    'https://abes-demo-ai-foundry.openai.azure.com/openai/v1',      -- model endpoint
+    'Cohere-rerank-v4.0-fast',                -- deployment name
+    'Cohere-rerank-v4.0-fast',                           -- model name
+    NULL,                               -- API version
+    'subscription-key',                                 -- auth type
+    '<key>'                               -- endpoint key
+);
+
 SELECT * FROM model_registry.model_list_all();
 
 CREATE SCHEMA hyro_ai_lab;
@@ -85,7 +125,7 @@ CREATE TABLE spot_demo_v1 (
 );
 
 SELECT ai.create_pipeline(
-    name => 'hyro_spot_documents',
+    name => 'hyro_spot_documents_byom',
     source => ai.table_source(
         table_name => 'spot_documents',
         schema_name => 'hyro_ai_lab'
@@ -98,7 +138,8 @@ SELECT ai.create_pipeline(
         ),
         ai.embed(
             input => 'chunk_text',
-            dimensions => 1536
+            dimensions => 1536,
+            model => 'text-embedding-3-small-byom'
         )
     ],
     trigger => 'manual',
@@ -108,9 +149,9 @@ SELECT ai.create_pipeline(
     )
 );
 
-SELECT ai.explain('hyro_spot_documents');
-SELECT ai.run('hyro_spot_documents');
--- SELECT ai.drop_pipeline('hyro_spot_documents');
+SELECT ai.explain('hyro_spot_documents_byom');
+SELECT ai.run('hyro_spot_documents_byom');
+-- SELECT ai.drop_pipeline('hyro_spot_documents_byom');
 
 -- STOP HERE until the durable run has committed and completed successfully.
 -- Reissue status as needed. Empty output is not proof of success.
@@ -134,7 +175,8 @@ CREATE INDEX spot_demo_v1_embedding_diskann_idx
 SELECT *
 FROM hyro_ai_lab.spot_demo_v1
 ORDER BY embedding <=> azure_openai.create_embeddings(
-    input => 'How do I schedule an appointment'
+    'text-embedding-3-small-byom', 
+    'How do I schedule an appointment'
 )::vector
 LIMIT 5;
 
@@ -150,7 +192,7 @@ SELECT chunk_text, chunk_text <@> to_bm25query(
         'How do I schedule an appointment', 'hyro_ai_lab.spot_demo_v1_bm25_idx'
         ) AS bm25_score
     FROM hyro_ai_lab.spot_demo_v1
-    ORDER BY bm25_score 
+    ORDER BY bm25_score
     LIMIT 10;
 
 ---====================================================
@@ -164,7 +206,7 @@ params AS (
             'How do I schedule an appointment', 'hyro_ai_lab.spot_demo_v1_bm25_idx'
         ) AS q_bm25,
         azure_openai.create_embeddings(
-            'text-embedding-3-small',
+            'text-embedding-3-small-byom',
             'How do I schedule an appointment',
             dimensions => 1536
         )::vector(1536) AS q_vec
@@ -209,6 +251,8 @@ LIMIT 10;
 --     query => 'How do I schedule a primary care appointment?',
 --     source_table => 'hyro_ai_lab.spot_demo_v1',
 --     search_type => 'hybrid',
+--     embedding_model => 'text-embedding-3-small-byom',
+--     rerank_model => 'cohere',
 --     top_k => 10,
 --     rerank => false
 -- ) AS result
