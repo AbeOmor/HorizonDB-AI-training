@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title description">
+  <title id="title">Azure HorizonDB: documents to AI-ready context</title>
+  <desc id="description">Load complete documents, chunk and embed them in a durable AI Pipeline, and retrieve relevant chunks using DiskANN vector search, BM25 keyword search, and hybrid rank fusion. The lab runs inside PostgreSQL.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#082B4C"/>
+      <stop offset="1" stop-color="#075E77"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0 0L7 4L0 8" fill="none" stroke="#76DCD9" stroke-width="1.5"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="420" rx="20" fill="url(#sky)"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="54" y="65" fill="#FFFFFF" font-size="32" font-weight="700">Your documents. Your database. AI-ready context.</text>
+    <text x="54" y="101" fill="#C5E5EF" font-size="18">Explore the retrieval foundation for AI applications with Azure HorizonDB.</text>
+    <g fill="#FFFFFF">
+      <rect x="54" y="142" width="300" height="190" rx="14"/>
+      <rect x="450" y="142" width="300" height="190" rx="14"/>
+      <rect x="846" y="142" width="300" height="190" rx="14"/>
+    </g>
+    <g fill="none" stroke="#76DCD9" stroke-width="3" marker-end="url(#arrow)">
+      <path d="M370 237H430"/>
+      <path d="M766 237H826"/>
+    </g>
+    <g fill="none" stroke="#006A82" stroke-width="2.5">
+      <path d="M82 166h27l12 12v35H82zM109 166v13h12M90 190h23M90 199h19"/>
+      <rect x="478" y="170" width="16" height="16" rx="3"/>
+      <rect x="512" y="170" width="16" height="16" rx="3"/>
+      <rect x="546" y="170" width="16" height="16" rx="3"/>
+      <path d="M494 178h18M528 178h18M486 186v20h68v-20"/>
+      <circle cx="887" cy="185" r="15"/>
+      <path d="M898 196l13 13M878 185h18M887 176v18"/>
+    </g>
+    <g fill="#082B4C" font-size="24" font-weight="700">
+      <text x="78" y="251">Load documents</text>
+      <text x="474" y="251">Prepare context</text>
+      <text x="870" y="251">Retrieve relevance</text>
+    </g>
+    <g fill="#36536A" font-size="17">
+      <text x="78" y="282">Complete source text</text>
+      <text x="78" y="307">Synthetic administrative guides</text>
+      <text x="474" y="282">Chunk + embed</text>
+      <text x="474" y="307">Durable AI Pipeline</text>
+      <text x="870" y="282">DiskANN + BM25</text>
+      <text x="870" y="307">Hybrid search with RRF</text>
+    </g>
+    <text x="54" y="382" fill="#FFFFFF" font-size="18" font-weight="700">One SQL learning journey, inside PostgreSQL.</text>
+    <text x="1146" y="382" text-anchor="end" fill="#C5E5EF" font-size="16">HorizonDB AI training</text>
+  </g>
+</svg>
