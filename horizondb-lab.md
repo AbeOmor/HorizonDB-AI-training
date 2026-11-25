@@ -26,7 +26,7 @@ Follow the [cluster quickstart](https://learn.microsoft.com/en-us/azure/horizond
 
 Follow [AI Model Management setup](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-model-management#enable-ai-model-management). Managed models avoid endpoint and key configuration in this lab. Confirm the registered alias in Part 1; aliases are not guaranteed to exist on every instance.
 
-For BYOM instead, follow [manual model registration](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-functions#option-2-manual-setup-with-model-registry) in your approved local tooling. Register an embedding deployment, not a chat or reranking model. Replace `default-embedding` consistently in the connectivity probe, pipeline, query embeddings, and optional `ai.search` call (`embedding_model`). Use the same model and 1,536 dimensions throughout. Registration does not validate endpoint credentials during preview; the connectivity probe is required before pipeline creation. Do not commit endpoint configuration or keys.
+For BYOM instead, use the optional registration templates in Part 1B and follow [manual model registration](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-functions#option-2-manual-setup-with-model-registry) in your approved local tooling. The retrieval lab needs an embedding deployment; chat and reranking registrations are optional extensions. Replace `default-embedding` consistently in the alias check, connectivity probe, pipeline, query embeddings, and optional `ai.search` call (`embedding_model`). Use the same model and 1,536 dimensions throughout. Registration does not validate endpoint credentials during preview; the connectivity probe is required before pipeline creation. Do not commit endpoint configuration or keys.
 
 ### Step 3 - Configure extensions and preloads
 
@@ -70,7 +70,48 @@ The bundled migration preserves existing stored pipeline descriptors and source/
 
 Builders return JSONB descriptors for deferred work. Unsuffixed `ai.embed`, `ai.generate`, `ai.extract`, `ai.rank`, and `ai.is_true` perform synchronous inference. Use named arguments: embedding builders take `input`, while direct embedding takes `text` and returns `real[]`, which must be cast to `vector` for distance operators.
 
-Confirm that the embedding model is registered and responds:
+## Part 1B: Register custom models in AIMM (Optional)
+
+Skip registration when using managed models. These templates retain the optional chat, embedding, and reranking setup with generic placeholders. Uncomment only the registrations you need in approved local tooling, and replace the endpoint, deployment, and key placeholders there, not in Git. `NULL` selects the latest API version; BYOM uses `subscription-key` authentication.
+
+```sql
+-- Register a custom chat model from Microsoft Foundry.
+-- SELECT model_registry.model_add(
+--     'gpt-5-byom',
+--     'https://<your-resource-name>.openai.azure.com/',
+--     '<chat-deployment-name>',
+--     'gpt-5.4',
+--     NULL,
+--     'subscription-key',
+--     '<endpoint-key>'
+-- );
+
+-- Register a custom embedding model.
+-- SELECT model_registry.model_add(
+--     'text-embedding-3-small-byom',
+--     'https://<your-resource-name>.openai.azure.com/',
+--     '<embedding-deployment-name>',
+--     'text-embedding-3-small',
+--     NULL,
+--     'subscription-key',
+--     '<endpoint-key>'
+-- );
+
+-- Register a custom reranking model.
+-- SELECT model_registry.model_add(
+--     'reranker-byom',
+--     'https://<your-resource-name>.services.ai.azure.com/',
+--     '<reranker-deployment-name>',
+--     'Cohere-rerank-v4.0-fast',
+--     NULL,
+--     'subscription-key',
+--     '<endpoint-key>'
+-- );
+```
+
+To use the custom embedding, replace `default-embedding` with `text-embedding-3-small-byom` throughout the remaining alias check, probe, pipeline, and queries, including `embedding_model` in `ai.search`. Do not substitute a chat or reranking alias for an embedding model. The main walkthrough remains configured for managed models.
+
+Whether using managed models or BYOM, confirm that the chosen embedding model is registered and responds:
 
 ```sql
 SELECT alias, model_name, status

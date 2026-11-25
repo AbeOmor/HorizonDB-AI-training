@@ -25,6 +25,49 @@ FROM pg_available_extension_versions
 WHERE name = 'azure_ai'
 ORDER BY version;
 
+---====================================================
+-- ## Part 1B: Register custom models in AIMM (Optional)
+---====================================================
+-- Skip this section for managed models. Uncomment only the registrations needed
+-- in your approved local tooling; replace placeholders there, never in Git.
+-- Chat and reranking models are optional extensions, not required for this lab.
+
+-- Register a custom chat model from Microsoft Foundry.
+-- SELECT model_registry.model_add(
+--     'gpt-5-byom',
+--     'https://<your-resource-name>.openai.azure.com/',
+--     '<chat-deployment-name>',
+--     'gpt-5.4',
+--     NULL,
+--     'subscription-key',
+--     '<endpoint-key>'
+-- );
+
+-- Register a custom embedding model.
+-- SELECT model_registry.model_add(
+--     'text-embedding-3-small-byom',
+--     'https://<your-resource-name>.openai.azure.com/',
+--     '<embedding-deployment-name>',
+--     'text-embedding-3-small',
+--     NULL,
+--     'subscription-key',
+--     '<endpoint-key>'
+-- );
+
+-- Register a custom reranking model.
+-- SELECT model_registry.model_add(
+--     'reranker-byom',
+--     'https://<your-resource-name>.services.ai.azure.com/',
+--     '<reranker-deployment-name>',
+--     'Cohere-rerank-v4.0-fast',
+--     NULL,
+--     'subscription-key',
+--     '<endpoint-key>'
+-- );
+
+-- For BYOM, replace default-embedding with text-embedding-3-small-byom in the
+-- alias check, probe, pipeline, and queries (embedding_model in ai.search).
+-- Registration does not validate connectivity; require a successful probe.
 SELECT alias, model_name, status
 FROM model_registry.model_list_all()
 WHERE alias = 'default-embedding';

@@ -43,7 +43,7 @@ The training follows the two files included in this repository:
 
 Synced with the [AI pipelines documentation](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-pipelines) updated November 17, 2026. The examples require **`azure_ai` 2.5.6 or later**, use `ai.chunk_step` / `ai.embed_step` for deferred pipeline work, and use `ai.embed` for immediate query embeddings. See the lab's version checks and upgrade guidance; existing stored pipelines do not need to be recreated for these renames.
 
-Both walkthroughs use the managed `default-embedding` model and identical SQL. For BYOM, follow the lab's optional setup guidance in approved local tooling and replace the model alias consistently; no endpoint or key configuration is embedded in this repository.
+Both walkthroughs use the managed `default-embedding` model and identical SQL. **Part 1B: Register custom models in AIMM (Optional)** retains commented chat, embedding, and reranking registration templates. For BYOM, fill in the generic placeholders only in approved local tooling and replace the embedding alias consistently; no real endpoints or keys are included.
 
 The scenario is a **generic workplace document-retrieval exercise** using six
 complete, synthetic documents: meeting-room booking, visitor parking, and
