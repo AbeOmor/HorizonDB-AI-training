@@ -8,6 +8,8 @@ Execute the SQL blocks individually, in order, using the same database connectio
 
 AI Pipeline names are database-wide. Run each `ai.create_pipeline()` statement only once per database. If you repeat the lab in the same database, skip creation statements for objects and pipelines that already exist.
 
+This guide uses the registered `default-embedding` model and pipeline name `hyro_spot_documents`. The companion SQL retains the BYOM variant: register your own embedding deployment as `text-embedding-3-small-byom` in Part 1B and use `hyro_spot_documents_byom` for every management call. Choose one walkthrough; do not run both against the same output table. Use the same embedding model and dimensions for pipeline and query embeddings.
+
 ## About this lab
 
 Build a retrieval proof of concept using synthetic, nonclinical health-system documents. This lab contains no patient data and does not provide clinical advice.
@@ -21,7 +23,7 @@ During this lab, you use HorizonDB to:
 1. Verify the required extensions and registered embedding models.
 2. Load complete source documents into `hyro_ai_lab.spot_documents`.
 3. Chunk and embed documents in one durable AI Pipeline.
-4. Verify the searchable chunks in `hyro_ai_lab.spot_demo_v1`.
+4. Verify the searchable chunks and embedding dimensions in `hyro_ai_lab.spot_demo_v1`.
 5. Create a DiskANN index and retrieve chunks by semantic similarity.
 6. Create a BM25 index and retrieve chunks by keyword relevance.
 7. Combine the top 50 keyword and vector candidates using reciprocal rank fusion (RRF), returning the top 10 results.
@@ -93,6 +95,29 @@ FROM pg_extension
 WHERE extname IN ('vector', 'pg_diskann', 'pg_textsearch', 'pg_durable', 'azure_ai')
 ORDER BY extname;
 ```
+
+### Check the current AI API version
+
+These examples follow the [AI pipelines documentation](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-pipelines) updated November 17, 2026 and require `azure_ai` **2.5.6 or later**. Verify the installed version above and the versions available on your server:
+
+```sql
+SELECT name, version, installed
+FROM pg_available_extension_versions
+WHERE name = 'azure_ai'
+ORDER BY version;
+```
+
+Stop if the installed version is older than 2.5.6. Only when 2.5.6 is available, an authorized administrator can run the following on the primary in each database that needs upgrading:
+
+```sql
+ALTER EXTENSION azure_ai UPDATE TO '2.5.6';
+```
+
+Do not downgrade a newer version. If the required version is unavailable, wait for the service update. The bundled migration preserves stored pipeline descriptors, source/sink tables, and catalog-bound dependencies; **do not recreate existing pipelines just for the rename**. Update scripts using the old builders before rerunning them.
+
+The pipeline builders are now `ai.chunk_step`, `ai.embed_step`, `ai.extract_step`, `ai.generate_step`, `ai.rank_step`, and `ai.is_true_step`. They describe deferred work. In contrast, `ai.embed(text => ...)` immediately generates an embedding for a query. Source/sink helpers and pipeline management functions keep their names. See the [AI schema migration guide](https://learn.microsoft.com/en-us/azure/horizondb/ai/migrate-ai-schema).
+
+Verify that `default-embedding` is registered before continuing:
 
 ```sql
 SELECT * FROM model_registry.model_list_all();
@@ -166,6 +191,8 @@ The records office posts an acknowledgment in the portal and provides instructio
 
 Create a searchable output table, then define one manual pipeline that chunks `content` and embeds `chunk_text` into 1,536-dimensional vectors. Run pipeline creation only once. The sample uses a 512 chunk size and 128 overlap; evaluate chunk boundaries against the application baseline before adoption.
 
+During preview, `ai.chunk_step` emits a **batch-local row number** as `doc_id`, not the primary key of `spot_documents`. It can repeat across incremental runs, and chunking does not retain other source columns or existing source metadata, including `plan_id`. This lab uses one run into an empty sink. Do not join chunks to source documents using `doc_id`, rerun into the populated sink, or treat this output as an authorization boundary. A production ingestion design must preserve stable source identity and access metadata separately.
+
 ```sql
 CREATE TABLE spot_demo_v1 (
     doc_id      INT,
@@ -183,14 +210,15 @@ SELECT ai.create_pipeline(
         schema_name => 'hyro_ai_lab'
     ),
     steps => ARRAY[
-        ai.chunk(
+        ai.chunk_step(
             input => 'content',
             chunk_size => 512,
             overlap => 128
         ),
-        ai.embed(
+        ai.embed_step(
             input => 'chunk_text',
-            dimensions => 1536
+            dimensions => 1536,
+            model => 'default-embedding'
         )
     ],
     trigger => 'manual',
@@ -221,12 +249,22 @@ SELECT * FROM ai.status('hyro_spot_documents');
 
 ## Part 4: Verify searchable chunks
 
-Inspect the output only after the durable pipeline run has completed successfully. Each result identifies its source document and chunk index.
+Inspect the output only after the durable pipeline run has completed successfully. Each result has a batch-local document number and chunk index, not a stable source document ID.
 
 ```sql
 SELECT *
 FROM hyro_ai_lab.spot_demo_v1
 LIMIT 10;
+```
+
+Confirm that chunks were produced, their text is nonempty, and every embedding has 1,536 dimensions. Stop and inspect pipeline status if these checks fail.
+
+```sql
+SELECT
+    count(*) AS chunk_count,
+    count(*) FILTER (WHERE chunk_text IS NULL OR btrim(chunk_text) = '') AS empty_chunks,
+    count(*) FILTER (WHERE embedding IS NULL OR vector_dims(embedding) <> 1536) AS invalid_embeddings
+FROM hyro_ai_lab.spot_demo_v1;
 ```
 
 ## Part 5: Add DiskANN For more efficient vector search. We will use this for hybrid search.
@@ -241,9 +279,11 @@ CREATE INDEX spot_demo_v1_embedding_diskann_idx
 ```sql
 SELECT *
 FROM hyro_ai_lab.spot_demo_v1
-ORDER BY embedding <=> azure_openai.create_embeddings(
-    input => 'How do I schedule an appointment'
-)::vector
+ORDER BY embedding <=> ai.embed(
+    text => 'How do I schedule an appointment',
+    model => 'default-embedding',
+    dimensions => 1536
+)::vector(1536)
 LIMIT 5;
 ```
 
@@ -268,7 +308,7 @@ SELECT chunk_text, chunk_text <@> to_bm25query(
 
 ## Part 7: Hybrid retrieval with reciprocal rank fusion in one SQL round trip
 
-The `params` CTE prepares the BM25 query and the query embedding. `bm25` and `vec` each rank up to 50 candidates. Join candidates on both `doc_id` and `chunk_index`, include chunks returned by either search, and return the top ten fused results. The example uses RRF constant 60 and substitutes rank 1000 for a missing match, exactly as in the source SQL.
+The `params` CTE prepares the BM25 query and the query embedding. `bm25` and `vec` each rank up to 50 candidates. For this single-run sink only, join candidates on both `doc_id` and `chunk_index`, include chunks returned by either search, and return the top ten fused results. Those columns are not a durable key across pipeline runs. The example uses RRF constant 60 and substitutes rank 1000 for a missing match, exactly as in the source SQL.
 
 ```sql
 WITH
@@ -277,9 +317,9 @@ params AS (
         to_bm25query(
             'How do I schedule an appointment', 'hyro_ai_lab.spot_demo_v1_bm25_idx'
         ) AS q_bm25,
-        azure_openai.create_embeddings(
-            'text-embedding-3-small',
-            'How do I schedule an appointment',
+        ai.embed(
+            text => 'How do I schedule an appointment',
+            model => 'default-embedding',
             dimensions => 1536
         )::vector(1536) AS q_vec
 ),

@@ -16,6 +16,12 @@ FROM pg_extension
 WHERE extname IN ('vector', 'pg_diskann', 'pg_textsearch', 'pg_durable', 'azure_ai')
 ORDER BY extname;
 
+-- STOP if azure_ai is older than 2.5.6. See the lab's upgrade instructions.
+SELECT name, version, installed
+FROM pg_available_extension_versions
+WHERE name = 'azure_ai'
+ORDER BY version;
+
 ---====================================================
 -- ## Part 1B: Register custom models in AIMM (Optional)
 ---====================================================
@@ -117,6 +123,8 @@ The records office posts an acknowledgment in the portal and provides instructio
 -- ## Part 3: Chunk and embed documents in one durable pipeline
 ---====================================================
 
+-- Run once against this empty sink. doc_id is batch-local, not spot_documents.id.
+-- Chunking does not preserve source metadata or plan membership in the sink.
 CREATE TABLE spot_demo_v1 (
     doc_id      INT,
     chunk_index INT,
@@ -131,12 +139,12 @@ SELECT ai.create_pipeline(
         schema_name => 'hyro_ai_lab'
     ),
     steps => ARRAY[
-        ai.chunk(
+        ai.chunk_step(
             input => 'content',
             chunk_size => 512,
             overlap => 128
         ),
-        ai.embed(
+        ai.embed_step(
             input => 'chunk_text',
             dimensions => 1536,
             model => 'text-embedding-3-small-byom'
@@ -155,7 +163,7 @@ SELECT ai.run('hyro_spot_documents_byom');
 
 -- STOP HERE until the durable run has committed and completed successfully.
 -- Reissue status as needed. Empty output is not proof of success.
-SELECT * FROM ai.status('hyro_spot_documents');
+SELECT * FROM ai.status('hyro_spot_documents_byom');
 
 ---====================================================
 -- ## Part 4: Verify searchable chunks
@@ -164,6 +172,14 @@ SELECT * FROM ai.status('hyro_spot_documents');
 SELECT *
 FROM hyro_ai_lab.spot_demo_v1
 LIMIT 10;
+
+-- Require chunk_count > 0, empty_chunks = 0, and invalid_embeddings = 0.
+-- Otherwise stop and inspect pipeline status before continuing.
+SELECT
+    count(*) AS chunk_count,
+    count(*) FILTER (WHERE chunk_text IS NULL OR btrim(chunk_text) = '') AS empty_chunks,
+    count(*) FILTER (WHERE embedding IS NULL OR vector_dims(embedding) <> 1536) AS invalid_embeddings
+FROM hyro_ai_lab.spot_demo_v1;
 
 ---====================================================
 -- ## Part 5: Add DiskANN For more efficient vector search. We will use this for hybrid search.
@@ -174,10 +190,11 @@ CREATE INDEX spot_demo_v1_embedding_diskann_idx
 
 SELECT *
 FROM hyro_ai_lab.spot_demo_v1
-ORDER BY embedding <=> azure_openai.create_embeddings(
-    'text-embedding-3-small-byom', 
-    'How do I schedule an appointment'
-)::vector
+ORDER BY embedding <=> ai.embed(
+    text => 'How do I schedule an appointment',
+    model => 'text-embedding-3-small-byom',
+    dimensions => 1536
+)::vector(1536)
 LIMIT 5;
 
 ---====================================================
@@ -199,15 +216,16 @@ SELECT chunk_text, chunk_text <@> to_bm25query(
 -- ## Part 7: Hybrid retrieval with reciprocal rank fusion in one SQL round trip
 ---====================================================
 
+-- (doc_id, chunk_index) identifies chunks only in this single-run sink.
 WITH
 params AS (
     SELECT
         to_bm25query(
             'How do I schedule an appointment', 'hyro_ai_lab.spot_demo_v1_bm25_idx'
         ) AS q_bm25,
-        azure_openai.create_embeddings(
-            'text-embedding-3-small-byom',
-            'How do I schedule an appointment',
+        ai.embed(
+            text => 'How do I schedule an appointment',
+            model => 'text-embedding-3-small-byom',
             dimensions => 1536
         )::vector(1536) AS q_vec
 ),
