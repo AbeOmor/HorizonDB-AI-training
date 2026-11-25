@@ -1,213 +1,227 @@
-# Azure HorizonDB AI lab: Hyro SPOT document retrieval
+# Azure HorizonDB AI lab: document retrieval
 
 ## Using this guide
 
-Connect to a new, dedicated Azure HorizonDB lab database using the PostgreSQL extension for Visual Studio Code or your SQL client. AI Model Management should already be enabled. Complete the prerequisites below before running Part 1 to verify and install the required extensions. Never put passwords, access tokens, endpoints, or API keys in this guide or the SQL script.
+Connect to a new, dedicated Azure HorizonDB lab database on the **primary (read-write) endpoint** using the PostgreSQL extension for Visual Studio Code or your SQL client. Complete the prerequisites before Part 1. Never put passwords, access tokens, endpoints, or API keys in committed files.
 
-Execute the SQL blocks individually, in order, using the same database connection with autocommit enabled. Do not execute the entire lab as one transaction. Parts 1-3 create persistent lab objects; do not blindly rerun setup, and stop on errors. Wait for the durable pipeline run to commit and complete successfully before starting Part 4.
+Execute SQL blocks individually, in order, on the same connection with autocommit enabled. Do not execute the entire lab as one transaction. Stop on errors. Parts 1-3 create persistent objects; setup is run-once, and pipeline names are database-wide. Do not blindly rerun setup or run both walkthroughs sequentially against the same sink.
 
-AI Pipeline names are database-wide. Run each `ai.create_pipeline()` statement only once per database. If you repeat the lab in the same database, skip creation statements for objects and pipelines that already exist.
-
-This guide uses the registered `default-embedding` model and pipeline name `hyro_spot_documents`. The companion SQL retains the BYOM variant: register your own embedding deployment as `text-embedding-3-small-byom` in Part 1B and use `hyro_spot_documents_byom` for every management call. Choose one walkthrough; do not run both against the same output table. Use the same embedding model and dimensions for pipeline and query embeddings.
+This guide and the [companion SQL](horizondb-ai-sql-queries-only.sql) use the same `default-embedding` model, `training_ai_lab` schema, and `training_document_retrieval` pipeline. Wait for the asynchronous run to commit and complete before Part 4.
 
 ## About this lab
 
-Build a retrieval proof of concept using synthetic, nonclinical health-system documents. This lab contains no patient data and does not provide clinical advice.
+A fictional workplace knowledge assistant retrieves meeting-room booking, visitor parking, and archived-project-document guidance for Team A and Team B. Six complete synthetic documents demonstrate different booking workflows and shared administrative instructions. No real customer documents or personal information are included.
 
-## Business story
+You will load documents, chunk and embed them in a durable pipeline, validate the output, and compare DiskANN vector search, BM25 keyword search, and hybrid reciprocal rank fusion (RRF). The walkthrough stops at retrieval, not answer generation.
 
-Hyro's SPOT assistant needs to retrieve administrative information about appointment scheduling, visitor parking, and records requests. The sample documents include Plan A and Plan B workflows so you can inspect how source documents become searchable chunks.
+The queries are **unfiltered** and do not enforce team or tenant isolation. Production applications need stable source identity, access controls, citations, evaluation, monitoring, and a tested ingestion/update lifecycle. Chunking drops source metadata during preview; do not infer authorization from the output.
 
-During this lab, you use HorizonDB to:
+## Prerequisites
 
-1. Verify the required extensions and registered embedding models.
-2. Load complete source documents into `hyro_ai_lab.spot_documents`.
-3. Chunk and embed documents in one durable AI Pipeline.
-4. Verify the searchable chunks and embedding dimensions in `hyro_ai_lab.spot_demo_v1`.
-5. Create a DiskANN index and retrieve chunks by semantic similarity.
-6. Create a BM25 index and retrieve chunks by keyword relevance.
-7. Combine the top 50 keyword and vector candidates using reciprocal rank fusion (RRF), returning the top 10 results.
-8. Review an optional `ai.search` hybrid-search example.
+### Step 1 - Create a dedicated cluster and database
 
-The hybrid query is an unfiltered retrieval demonstration: it does not enforce plan or tenant isolation. Before personalizing answers, enforce the applicable health-system and plan boundaries. Keep application-side reranking, prompts, answer generation, citations, healthcare-safety overrides, and evaluation outside this SQL walkthrough. Do not send urgent or emergency requests through this demo.
+Follow the [cluster quickstart](https://learn.microsoft.com/en-us/azure/horizondb/configure-maintain/quickstart-create-cluster). Allow your client IP through networking and connect to the primary endpoint. Azure resources and model calls may incur charges.
 
-Prerequisites
--------------
-Before you begin, perform the following steps:
+### Step 2 - Enable AI Model Management
 
-#### Step 1 - Create an Azure HorizonDB instance
-  - [Steps to create an Azure HorizonDB Cluster](https://learn.microsoft.com/en-us/azure/horizondb/configure-maintain/quickstart-create-cluster)
-  - For this training, you can choose to Disable High Availability.
-  - In the Networking section, ensure to "Add current client IP" to allow list your IP address and connect to the cluster.
+Follow [AI Model Management setup](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-model-management#enable-ai-model-management). Managed models avoid endpoint and key configuration in this lab. Confirm the registered alias in Part 1; aliases are not guaranteed to exist on every instance.
 
-#### Step 2 - Enable AI Model Management
-  - [Steps to enable AI Model Management](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-model-management#enable-ai-model-management)
-  - Enabling it automatically installs azure_ai, pg_durable, vector, and pg_diskann and registers the managed models.
+For BYOM instead, use the optional registration templates in Part 1B and follow [manual model registration](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-functions#option-2-manual-setup-with-model-registry) in your approved local tooling. The retrieval lab needs an embedding deployment; chat and reranking registrations are optional extensions. Replace `default-embedding` consistently in the alias check, connectivity probe, pipeline, query embeddings, and optional `ai.search` call (`embedding_model`). Use the same model and 1,536 dimensions throughout. Registration does not validate endpoint credentials during preview; the connectivity probe is required before pipeline creation. Do not commit endpoint configuration or keys.
 
-### Step 3 - Allow-list pg_textsearch and pg_durable
+### Step 3 - Configure extensions and preloads
 
-Allow both `pg_textsearch` (BM25 full-text search) and `pg_durable` (durable AI Pipelines) in `azure.extensions` through the Azure HorizonDB cluster parameter group. Also preload `pg_textsearch` through `shared_preload_libraries`.
+In the cluster parameter group, preserve all existing parameter values:
 
-1. In Azure HorizonDB portal view, go to Settings -> Parameters
-2. Click on "create" next to Parameter group.
-3. In the "Create a parameter group" pane, provide the project details and click on Next.
-4. Search for "shared_preload_libraries" and add "pg_textsearch", preserving every existing value.
-5. Search for "azure.extensions" and add both "pg_textsearch" and "pg_durable", preserving every existing value.
-6. Click create.
-7. Once the parameter group deployment completes, go back to "Parameters" pane, select "(change)" and replace the "default" Parameter group by this new parameter group. 
+1. Allow the required extensions in `azure.extensions`: `vector`, `pg_diskann`, `azure_ai`, `pg_durable`, and `pg_textsearch`.
+2. Add **both `pg_durable` and `pg_textsearch`** to `shared_preload_libraries`.
+3. Apply the parameter group and complete any required restart before installing extensions.
 
-For more details see [Steps to enable pg_textsearch](https://learn.microsoft.com/en-us/azure/horizondb/ai/full-text-search#enable-pg_textsearch)
+If `CREATE EXTENSION pg_durable` reports that it must be loaded via `shared_preload_libraries`, fix the preload and restart first. See [durable functions](https://learn.microsoft.com/en-us/azure/horizondb/development/durable-functions) and [BM25 setup](https://learn.microsoft.com/en-us/azure/horizondb/ai/full-text-search#enable-pg_textsearch).
 
-#### Step 4 - Connect to the Azure HorizonDB cluster
-- Connect to Azure HorizonDB cluster using Visual Studio Code. [Quickstart: PostgreSQL Extension for Visual Studio Code for Azure HorizonDB](https://learn.microsoft.com/en-us/azure/horizondb/development/vs-code-extension/vs-code-connect)
-- Use a new, dedicated lab database. Execute the SQL blocks below or run [horizondb-ai-sql-queries-only.sql](./horizondb-ai-sql-queries-only.sql) section by section against the same database.
-- Note: AI Pipeline names are database-wide, so run each ai.create_pipeline() statement only once in the lab database.
+### Step 4 - Connect and check the API version
+
+Use [the PostgreSQL extension for VS Code](https://learn.microsoft.com/en-us/azure/horizondb/development/vs-code-extension/vs-code-connect) or your SQL client. These examples follow the [AI pipelines documentation](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-pipelines), updated November 17, 2026, and require **`azure_ai` 2.5.6 or later**.
 
 ## Part 1: Verify prerequisites and the embedding model
 
-Confirm that all five extensions are installed and inspect the registered models. Create the dedicated `hyro_ai_lab` schema and set the search path for this connection.
+Install and inspect the five required extensions:
 
 ```sql
--- Provision/allowlist these extensions before running this as a pipeline owner.
-
 CREATE EXTENSION IF NOT EXISTS vector;
-```
-
-```sql
 CREATE EXTENSION IF NOT EXISTS pg_diskann;
-```
-
-```sql
 CREATE EXTENSION IF NOT EXISTS pg_textsearch;
-```
-
-```sql
 CREATE EXTENSION IF NOT EXISTS pg_durable;
-```
-
-```sql
 CREATE EXTENSION IF NOT EXISTS azure_ai;
-```
 
-```sql
 SELECT extname, extversion
 FROM pg_extension
 WHERE extname IN ('vector', 'pg_diskann', 'pg_textsearch', 'pg_durable', 'azure_ai')
 ORDER BY extname;
-```
 
-### Check the current AI API version
-
-These examples follow the [AI pipelines documentation](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-pipelines) updated November 17, 2026 and require `azure_ai` **2.5.6 or later**. Verify the installed version above and the versions available on your server:
-
-```sql
 SELECT name, version, installed
 FROM pg_available_extension_versions
 WHERE name = 'azure_ai'
 ORDER BY version;
 ```
 
-Stop if the installed version is older than 2.5.6. Only when 2.5.6 is available, an authorized administrator can run the following on the primary in each database that needs upgrading:
+Stop if `azure_ai` is older than 2.5.6. When 2.5.6 is available, an authorized administrator can run `ALTER EXTENSION azure_ai UPDATE TO '2.5.6';` on the primary in each database that needs upgrading, then recheck the installed version. Do not downgrade a newer version. If 2.5.6 is unavailable, wait for the service update.
+
+The bundled migration preserves existing stored pipeline descriptors and source/sink tables. Do not recreate existing pipelines just for the builder renames. Update pipeline-creation scripts to use `ai.chunk_step`, `ai.embed_step`, `ai.extract_step`, `ai.generate_step`, `ai.rank_step`, and `ai.is_true_step`. Source/sink helpers and management function names are unchanged. See [AI schema migration](https://learn.microsoft.com/en-us/azure/horizondb/ai/migrate-ai-schema).
+
+Builders return JSONB descriptors for deferred work. Unsuffixed `ai.embed`, `ai.generate`, `ai.extract`, `ai.rank`, and `ai.is_true` perform synchronous inference. Use named arguments: embedding builders take `input`, while direct embedding takes `text` and returns `real[]`, which must be cast to `vector` for distance operators.
+
+## Part 1B: Register custom models in AIMM (Optional)
+
+Skip registration when using managed models. These templates retain the optional chat, embedding, and reranking setup with generic placeholders. Uncomment only the registrations you need in approved local tooling, and replace the endpoint, deployment, and key placeholders there, not in Git. `NULL` selects the latest API version; BYOM uses `subscription-key` authentication.
 
 ```sql
-ALTER EXTENSION azure_ai UPDATE TO '2.5.6';
+-- Register a custom chat model from Microsoft Foundry.
+-- SELECT model_registry.model_add(
+--     'gpt-5-byom',
+--     'https://<your-resource-name>.openai.azure.com/',
+--     '<chat-deployment-name>',
+--     'gpt-5.4',
+--     NULL,
+--     'subscription-key',
+--     '<endpoint-key>'
+-- );
+
+-- Register a custom embedding model.
+-- SELECT model_registry.model_add(
+--     'text-embedding-3-small-byom',
+--     'https://<your-resource-name>.openai.azure.com/',
+--     '<embedding-deployment-name>',
+--     'text-embedding-3-small',
+--     NULL,
+--     'subscription-key',
+--     '<endpoint-key>'
+-- );
+
+-- Register a custom reranking model.
+-- SELECT model_registry.model_add(
+--     'reranker-byom',
+--     'https://<your-resource-name>.services.ai.azure.com/',
+--     '<reranker-deployment-name>',
+--     'Cohere-rerank-v4.0-fast',
+--     NULL,
+--     'subscription-key',
+--     '<endpoint-key>'
+-- );
 ```
 
-Do not downgrade a newer version. If the required version is unavailable, wait for the service update. The bundled migration preserves stored pipeline descriptors, source/sink tables, and catalog-bound dependencies; **do not recreate existing pipelines just for the rename**. Update scripts using the old builders before rerunning them.
+To use the custom embedding, replace `default-embedding` with `text-embedding-3-small-byom` throughout the remaining alias check, probe, pipeline, and queries, including `embedding_model` in `ai.search`. Do not substitute a chat or reranking alias for an embedding model. The main walkthrough remains configured for managed models.
 
-The pipeline builders are now `ai.chunk_step`, `ai.embed_step`, `ai.extract_step`, `ai.generate_step`, `ai.rank_step`, and `ai.is_true_step`. They describe deferred work. In contrast, `ai.embed(text => ...)` immediately generates an embedding for a query. Source/sink helpers and pipeline management functions keep their names. See the [AI schema migration guide](https://learn.microsoft.com/en-us/azure/horizondb/ai/migrate-ai-schema).
-
-Verify that `default-embedding` is registered before continuing:
+Whether using managed models or BYOM, confirm that the chosen embedding model is registered and responds:
 
 ```sql
-SELECT * FROM model_registry.model_list_all();
+SELECT alias, model_name, status
+FROM model_registry.model_list_all()
+WHERE alias = 'default-embedding';
+
+WITH probe AS (
+    SELECT ai.embed(
+        text => 'connectivity test',
+        model => 'default-embedding',
+        dimensions => 1536
+    )::vector AS embedding
+)
+SELECT vector_dims(embedding) AS embedding_dimensions,
+       embedding IS NOT NULL AND vector_dims(embedding) = 1536 AS embedding_ready
+FROM probe;
 ```
 
-```sql
-CREATE SCHEMA hyro_ai_lab;
-```
+Require a registered alias, `embedding_dimensions = 1536`, and `embedding_ready = true`. Stop and fix model configuration if the probe fails or returns a NULL embedding.
 
 ```sql
-SET search_path = hyro_ai_lab, public;
+CREATE SCHEMA training_ai_lab;
+SET search_path = training_ai_lab, public;
 ```
 
 ## Part 2: Load complete source documents
 
-Load six complete synthetic source documents: appointment scheduling, parking, and records requests for each of two plans. The pipeline, not the import step, owns chunking and embedding.
+The pipeline, not the import step, owns chunking and embedding. Each row represents a complete document/team membership. `id` is a monotonic identity column used as the **required incremental watermark** for this insert-only exercise. It advances on inserts, not updates; editing existing documents requires an advancing revision/timestamp watermark and an update-safe ingestion design.
 
 ```sql
--- One row per document/plan membership, not one row per precomputed chunk.
--- An actual build must also carry its health-system/tenant identity;
--- this dedicated POC contains only one synthetic health system.
-CREATE TABLE spot_documents (
+CREATE TABLE training_documents (
     id          integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     title       text NOT NULL,
     source_url  text NOT NULL,
-    plan_id     text NOT NULL,
+    team_id     text NOT NULL,
     content     text NOT NULL CHECK (btrim(content) <> ''),
-    UNIQUE (source_url, plan_id)
+    UNIQUE (source_url, team_id)
 );
+
+INSERT INTO training_documents (title, source_url, team_id, content) VALUES
+    ('Book a meeting room',
+     'https://training.example/team-a/room-booking', 'team-a',
+     $document$In this fictional workplace, Team A books meeting rooms through the staff portal. Open the room booking page, choose a building, and select a preferred room and time window. Submit the booking request through the portal.
+
+Submitting a request does not confirm a reservation. The facilities team reviews the request and posts the confirmed room, date, and time in the portal. Check the confirmation before inviting visitors. If no confirmation appears, contact facilities through the portal message center.
+
+To change a request, open its details page and select the change option. Facilities reviews changes using the same confirmation process.$document$),
+    ('Book a meeting room',
+     'https://training.example/team-b/room-booking', 'team-b',
+     $document$In this fictional workplace, Team B books meeting rooms by contacting the facilities team. Unlike Team A, Team B cannot submit new room booking requests through the staff portal. Use the facilities contact in the team directory and provide a preferred building, room, and time window.
+
+Facilities reviews room availability and confirms the room, date, and time. A preferred window is not a confirmed reservation. Wait for confirmation before inviting visitors. If confirmation is missing, contact facilities again using the team directory.
+
+To change or cancel a reservation, contact the same facilities team. The team records the change and provides an updated confirmation.$document$),
+    ('Visitor parking and directions',
+     'https://training.example/parking', 'team-a',
+     $document$In this fictional workplace, visitor parking is in the north garage. Follow the visitor signs from the campus entrance to the garage entrance. The main building entrance is on the first floor.
+
+After parking, use the marked pedestrian route to the main entrance. The visitor information desk is inside the lobby and can provide directions to meeting rooms and administrative offices. Keep the parking ticket available for the return trip. These directions are the same for Team A and Team B.$document$),
+    ('Visitor parking and directions',
+     'https://training.example/parking', 'team-b',
+     $document$In this fictional workplace, visitor parking is in the north garage. Follow the visitor signs from the campus entrance to the garage entrance. The main building entrance is on the first floor.
+
+After parking, use the marked pedestrian route to the main entrance. The visitor information desk is inside the lobby and can provide directions to meeting rooms and administrative offices. Keep the parking ticket available for the return trip. These directions are the same for Team A and Team B.$document$),
+    ('Request an archived project document',
+     'https://training.example/archive', 'team-a',
+     $document$In this fictional workplace, the archive team accepts project document requests through the staff portal. Open the archive request page and choose the project and document type. Submit the request using the archive form rather than a room booking message.
+
+The archive team posts an acknowledgment in the portal and provides instructions for the next step. Check the request status page for updates. If the project or document is not listed, contact the archive team through the portal message center. These instructions are the same for Team A and Team B. This sample contains no real project files or personal information.$document$),
+    ('Request an archived project document',
+     'https://training.example/archive', 'team-b',
+     $document$In this fictional workplace, the archive team accepts project document requests through the staff portal. Open the archive request page and choose the project and document type. Submit the request using the archive form rather than a room booking message.
+
+The archive team posts an acknowledgment in the portal and provides instructions for the next step. Check the request status page for updates. If the project or document is not listed, contact the archive team through the portal message center. These instructions are the same for Team A and Team B. This sample contains no real project files or personal information.$document$);
+
+SELECT count(*) AS source_document_count
+FROM training_ai_lab.training_documents;
 ```
 
-```sql
-INSERT INTO spot_documents (title, source_url, plan_id, content) VALUES
-    ('Schedule a primary care appointment',
-     'https://hyro-poc.example/plan-a/appointments', 'plan-a',
-     $document$For this synthetic health system, Plan A members request a primary care appointment through the member portal. Open the scheduling page, choose primary care, and select a preferred location. The portal displays available request windows for that location. Choose a window and submit the appointment request.
-
-Submitting a request does not confirm an appointment. The scheduling team reviews the request and posts the confirmed date, time, and location in the member portal. Members should check the confirmation before making travel arrangements. If no confirmation appears, contact the scheduling team through the portal message center.
-
-To change an existing request, open the appointment details page and select the change option. The scheduling team reviews changes using the same confirmation process. This synthetic guide describes administrative scheduling only and does not provide clinical advice.$document$),
-    ('Schedule a primary care appointment',
-     'https://hyro-poc.example/plan-b/appointments', 'plan-b',
-     $document$For this synthetic health system, Plan B members request primary care appointments by contacting the scheduling team. Unlike the Plan A workflow, the Plan B member portal does not accept new primary care appointment requests. Use the scheduling contact listed in the plan directory and provide a preferred location and request window.
-
-The scheduling team reviews available appointment times and confirms the date, time, and location with the member. A preferred window is not a confirmed appointment. Members should wait for confirmation before making travel arrangements. If a confirmation is missing, contact the scheduling team again using the plan directory.
-
-To change or cancel a confirmed appointment, contact the same scheduling team. The team records the change and provides an updated confirmation. This synthetic guide covers administrative scheduling only and does not provide clinical advice.$document$),
-    ('Visitor parking and directions',
-     'https://hyro-poc.example/parking', 'plan-a',
-     $document$In this synthetic example, visitor parking is in the north garage. Follow the visitor signs from the campus entrance to the garage entrance. The main building entrance is on the first floor.
-
-After parking, use the marked pedestrian route to the main entrance. The visitor information desk is inside the lobby and can provide directions to administrative offices. Keep the parking ticket available for the return trip. These directions are the same for Plan A and Plan B members.$document$),
-    ('Visitor parking and directions',
-     'https://hyro-poc.example/parking', 'plan-b',
-     $document$In this synthetic example, visitor parking is in the north garage. Follow the visitor signs from the campus entrance to the garage entrance. The main building entrance is on the first floor.
-
-After parking, use the marked pedestrian route to the main entrance. The visitor information desk is inside the lobby and can provide directions to administrative offices. Keep the parking ticket available for the return trip. These directions are the same for Plan A and Plan B members.$document$),
-    ('Request a copy of your records',
-     'https://hyro-poc.example/records', 'plan-a',
-     $document$In this synthetic example, the records office accepts document requests through the member portal. Open the records request page and choose the type of document requested. Submit the request using the portal form rather than an appointment scheduling message.
-
-The records office posts an acknowledgment in the portal and provides instructions for the next administrative step. Check the request status page for updates. If the requested document is not listed, contact the records office through the portal message center. This sample contains no patient records or personal information.$document$),
-    ('Request a copy of your records',
-     'https://hyro-poc.example/records', 'plan-b',
-     $document$In this synthetic example, the records office accepts document requests through the member portal. Open the records request page and choose the type of document requested. Submit the request using the portal form rather than an appointment scheduling message.
-
-The records office posts an acknowledgment in the portal and provides instructions for the next administrative step. Check the request status page for updates. If the requested document is not listed, contact the records office through the portal message center. This sample contains no patient records or personal information.$document$);
-```
+Require `source_document_count = 6`. The `.example` URLs are fictional identifiers; the pipeline reads table content, not those URLs.
 
 ## Part 3: Chunk and embed documents in one durable pipeline
 
-Create a searchable output table, then define one manual pipeline that chunks `content` and embeds `chunk_text` into 1,536-dimensional vectors. Run pipeline creation only once. The sample uses a 512 chunk size and 128 overlap; evaluate chunk boundaries against the application baseline before adoption.
+Create an empty sink with the exact output names for chunking and embedding. The sample uses a chunk size of 512, overlap of 128, and 1,536-dimensional embeddings. Evaluate chunk boundaries for your own corpus.
 
-During preview, `ai.chunk_step` emits a **batch-local row number** as `doc_id`, not the primary key of `spot_documents`. It can repeat across incremental runs, and chunking does not retain other source columns or existing source metadata, including `plan_id`. This lab uses one run into an empty sink. Do not join chunks to source documents using `doc_id`, rerun into the populated sink, or treat this output as an authorization boundary. A production ingestion design must preserve stable source identity and access metadata separately.
+During preview, `ai.chunk_step` emits a **batch-local row number** as `doc_id`, not `training_documents.id`. It can repeat across batches or incremental runs. Chunking does not retain source columns or preexisting metadata, including `team_id`. This lab submits one small run into an empty sink and checks chunk identity before joining retrieval candidates. Do not join chunks to source rows using `doc_id`, treat it as a durable key, or rerun into the populated sink.
 
 ```sql
-CREATE TABLE spot_demo_v1 (
+CREATE TABLE document_chunks (
     doc_id      INT,
     chunk_index INT,
     chunk_text  TEXT,
     embedding   vector(1536)
 );
+
+SELECT column_name, data_type, udt_name
+FROM information_schema.columns
+WHERE table_schema = 'training_ai_lab' AND table_name = 'document_chunks'
+ORDER BY ordinal_position;
 ```
+
+Require all four columns above (`embedding` has `udt_name = vector`). If the sink does not exist, `ai.create_pipeline` creates it from inferred outputs, without keys, constraints, or indexes. An existing sink missing a step's output column can silently discard that result while reporting success, so inspect the schema before running and validate values afterward. A custom `output` argument on a builder must match the sink and downstream queries. This lab uses default output names.
 
 ```sql
 SELECT ai.create_pipeline(
-    name => 'hyro_spot_documents',
+    name => 'training_document_retrieval',
     source => ai.table_source(
-        table_name => 'spot_documents',
-        schema_name => 'hyro_ai_lab'
+        table_name => 'training_documents',
+        incremental_column => 'id',
+        schema_name => 'training_ai_lab'
     ),
     steps => ARRAY[
         ai.chunk_step(
@@ -223,102 +237,108 @@ SELECT ai.create_pipeline(
     ],
     trigger => 'manual',
     sink => ai.table_sink(
-        table_name => 'spot_demo_v1',
-        schema_name => 'hyro_ai_lab'
+        table_name => 'document_chunks',
+        schema_name => 'training_ai_lab'
     )
 );
+
+SELECT ai.explain('training_document_retrieval');
+SELECT ai.run('training_document_retrieval');
 ```
+
+Creation registers a definition; it does not process existing rows. `ai.run` submits a durable instance and returns **before completion**. Let the submission commit, then poll:
 
 ```sql
-SELECT ai.explain('hyro_spot_documents');
+SELECT * FROM ai.status('training_document_retrieval');
+
+SELECT id, instance_id, status, rows_processed, error, started_at, completed_at
+FROM ai.pipeline_runs
+WHERE pipeline_name = 'training_document_retrieval'
+ORDER BY id DESC
+LIMIT 5;
 ```
 
-```sql
-SELECT ai.run('hyro_spot_documents');
-```
+**Stop before Part 4 until `last_run_status = completed` and the latest run has completed.** If it fails or is terminated, inspect `error` and `instance_id`. During preview, `ai.status().total_processed` can remain zero even for a completed run; use `ai.pipeline_runs.rows_processed` for per-run progress. Empty output is never proof of success.
 
-**Stop before Part 4.** Let `ai.run` commit, then check the status below. Reissue the status query as needed until the durable run has completed successfully. Empty output is not proof of success. Do not run `ai.drop_pipeline` during the walkthrough.
-
-```sql
--- SELECT ai.drop_pipeline('hyro_spot_documents');
-
--- STOP HERE until the durable run has committed and completed successfully.
--- Reissue status as needed. Empty output is not proof of success.
-SELECT * FROM ai.status('hyro_spot_documents');
-```
+Both `manual` and `on_change` require an incremental column. `on_change` still needs an explicit initial `ai.run`; source deletes do not trigger processing, and changes during an active run do not queue another run. This lab intentionally uses manual execution.
 
 ## Part 4: Verify searchable chunks
 
-Inspect the output only after the durable pipeline run has completed successfully. Each result has a batch-local document number and chunk index, not a stable source document ID.
+Inspect actual output only after completion. Require nonempty text, valid embeddings, non-NULL chunk identities, and no duplicate `(doc_id, chunk_index)` pairs before retrieval:
 
 ```sql
 SELECT *
-FROM hyro_ai_lab.spot_demo_v1
+FROM training_ai_lab.document_chunks
+ORDER BY doc_id, chunk_index
 LIMIT 10;
-```
 
-Confirm that chunks were produced, their text is nonempty, and every embedding has 1,536 dimensions. Stop and inspect pipeline status if these checks fail.
-
-```sql
 SELECT
     count(*) AS chunk_count,
     count(*) FILTER (WHERE chunk_text IS NULL OR btrim(chunk_text) = '') AS empty_chunks,
     count(*) FILTER (WHERE embedding IS NULL OR vector_dims(embedding) <> 1536) AS invalid_embeddings
-FROM hyro_ai_lab.spot_demo_v1;
+FROM training_ai_lab.document_chunks;
+
+SELECT count(*) FILTER (WHERE doc_id IS NULL OR chunk_index IS NULL) AS invalid_chunk_ids
+FROM training_ai_lab.document_chunks;
+
+SELECT doc_id, chunk_index, count(*) AS duplicate_count
+FROM training_ai_lab.document_chunks
+GROUP BY doc_id, chunk_index
+HAVING count(*) > 1;
 ```
 
-## Part 5: Add DiskANN For more efficient vector search. We will use this for hybrid search.
+Require `chunk_count > 0`, `empty_chunks = 0`, `invalid_embeddings = 0`, `invalid_chunk_ids = 0`, and no duplicate rows. Inspect the returned text to confirm the intended documents were processed; chunk count is not source document count.
 
-Create a DiskANN cosine-distance index and retrieve the five nearest chunks for an appointment-scheduling question. Lower cosine distance means greater semantic similarity.
+If validation fails, inspect run history and model configuration. A normal rerun can skip rows already checkpointed. For recovery or model/chunking changes, preserve the current sink, backfill into a separate staging sink, wait for completion, and validate before replacement. Do not truncate the current sink before an asynchronous backfill finishes. See [output verification and safe rebuilds](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-pipelines#verify-pipeline-output). Incremental selection does not make this append-only sink update-safe or model calls exactly-once.
+
+## Part 5: Add DiskANN and run vector search
+
+Create a cosine-distance index after embeddings exist, then retrieve five semantically similar chunks. Lower cosine distance is better. This tiny corpus is functional training, not a latency or recall benchmark.
 
 ```sql
-CREATE INDEX spot_demo_v1_embedding_diskann_idx
-    ON hyro_ai_lab.spot_demo_v1 USING diskann (embedding vector_cosine_ops);
-```
+CREATE INDEX document_chunks_embedding_diskann_idx
+    ON training_ai_lab.document_chunks USING diskann (embedding vector_cosine_ops);
 
-```sql
 SELECT *
-FROM hyro_ai_lab.spot_demo_v1
+FROM training_ai_lab.document_chunks
 ORDER BY embedding <=> ai.embed(
-    text => 'How do I schedule an appointment',
+    text => 'How do I book a meeting room?',
     model => 'default-embedding',
     dimensions => 1536
 )::vector(1536)
 LIMIT 5;
 ```
 
-## Part 6: Move chunk_text BM25 into PostgreSQL (also the BM25-only fallback)
+## Part 6: Add BM25 and run keyword search
 
-Create a BM25 index on `chunk_text`, then retrieve the ten best keyword matches. The `<@>` result is ordered ascending, as in the source SQL.
+BM25 provides keyword retrieval without a query embedding. Order the `<@>` score ascending.
 
 ```sql
-CREATE INDEX spot_demo_v1_bm25_idx
-    ON hyro_ai_lab.spot_demo_v1 USING bm25 (chunk_text)
+CREATE INDEX document_chunks_bm25_idx
+    ON training_ai_lab.document_chunks USING bm25 (chunk_text)
     WITH (text_config = 'english');
-```
 
-```sql
 SELECT chunk_text, chunk_text <@> to_bm25query(
-        'How do I schedule an appointment', 'hyro_ai_lab.spot_demo_v1_bm25_idx'
-        ) AS bm25_score
-    FROM hyro_ai_lab.spot_demo_v1
-    ORDER BY bm25_score 
-    LIMIT 10;
+        'How do I book a meeting room?', 'training_ai_lab.document_chunks_bm25_idx'
+    ) AS bm25_score
+FROM training_ai_lab.document_chunks
+ORDER BY bm25_score
+LIMIT 10;
 ```
 
-## Part 7: Hybrid retrieval with reciprocal rank fusion in one SQL round trip
+## Part 7: Hybrid retrieval with reciprocal rank fusion
 
-The `params` CTE prepares the BM25 query and the query embedding. `bm25` and `vec` each rank up to 50 candidates. For this single-run sink only, join candidates on both `doc_id` and `chunk_index`, include chunks returned by either search, and return the top ten fused results. Those columns are not a durable key across pipeline runs. The example uses RRF constant 60 and substitutes rank 1000 for a missing match, exactly as in the source SQL.
+`params` prepares both queries. Each retrieval branch ranks up to 50 candidates; the join uses the validated single-run chunk pair and includes results from either branch. Return the top ten fused scores using constant 60 and fallback rank 1000 for a missing match.
 
 ```sql
 WITH
 params AS (
     SELECT
         to_bm25query(
-            'How do I schedule an appointment', 'hyro_ai_lab.spot_demo_v1_bm25_idx'
+            'How do I book a meeting room?', 'training_ai_lab.document_chunks_bm25_idx'
         ) AS q_bm25,
         ai.embed(
-            text => 'How do I schedule an appointment',
+            text => 'How do I book a meeting room?',
             model => 'default-embedding',
             dimensions => 1536
         )::vector(1536) AS q_vec
@@ -327,7 +347,7 @@ bm25 AS (
     SELECT
         p.doc_id, p.chunk_index,
         ROW_NUMBER() OVER (ORDER BY p.chunk_text <@> params.q_bm25) AS bm25_rank
-    FROM hyro_ai_lab.spot_demo_v1 AS p
+    FROM training_ai_lab.document_chunks AS p
     CROSS JOIN params
     ORDER BY p.chunk_text <@> params.q_bm25
     LIMIT 50
@@ -336,7 +356,7 @@ vec AS (
     SELECT
         p.doc_id, p.chunk_index,
         ROW_NUMBER() OVER (ORDER BY p.embedding <=> params.q_vec) AS vec_rank
-    FROM hyro_ai_lab.spot_demo_v1 AS p
+    FROM training_ai_lab.document_chunks AS p
     CROSS JOIN params
     ORDER BY p.embedding <=> params.q_vec
     LIMIT 50
@@ -345,7 +365,7 @@ SELECT
     p.doc_id, p.chunk_index, p.chunk_text,
     (1.0 / (60 + COALESCE(b.bm25_rank, 1000)))
         + (1.0 / (60 + COALESCE(v.vec_rank, 1000))) AS rrf_score
-FROM hyro_ai_lab.spot_demo_v1 AS p
+FROM training_ai_lab.document_chunks AS p
 LEFT JOIN bm25 AS b
     ON b.doc_id = p.doc_id AND b.chunk_index = p.chunk_index
 LEFT JOIN vec AS v
@@ -355,19 +375,43 @@ ORDER BY rrf_score DESC
 LIMIT 10;
 ```
 
+Change the question consistently in both branches when comparing retrieval behavior. Do not assume the highest-ranked passage is sufficient to generate an answer.
+
 ## Part 8: Optional ai.search demonstration
 
-This example is commented out in the source SQL and is intentionally not an executable step. Verify the `ai.search` contract on your target HorizonDB build before running it.
+The [documented `ai.search` API](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-search) is a higher-level retrieval interface, not an answer generator. Confirm the installed signature first; if absent or incompatible, stop this optional section:
 
 ```sql
-SELECT *
+SELECT p.oid::regprocedure AS function_signature,
+       pg_get_function_arguments(p.oid) AS arguments
+FROM pg_proc AS p
+JOIN pg_namespace AS n ON n.oid = p.pronamespace
+WHERE n.nspname = 'ai' AND p.proname = 'search';
+```
+
+The following is commented out in the companion SQL. Run it only after verifying availability and both eligible indexes. Explicit columns and embedding alias keep it consistent with the pipeline:
+
+```sql
+SELECT chunks.doc_id, chunks.chunk_index, chunks.chunk_text,
+       result.match_type, result.score
 FROM ai.search(
-    query => 'How do I schedule a primary care appointment?',
-    source_table => 'hyro_ai_lab.spot_demo_v1',
+    query => 'How do I book a meeting room?',
+    source_table => 'training_ai_lab.document_chunks',
     search_type => 'hybrid',
     top_k => 10,
+    content_column => 'chunk_text',
+    embedding_column => 'embedding',
+    embedding_model => 'default-embedding',
     rerank => false
 ) AS result
-JOIN hyro_ai_lab.spot_demo_v1 AS chunks ON chunks.ctid = result.ctid
+JOIN training_ai_lab.document_chunks AS chunks ON chunks.ctid = result.ctid
 ORDER BY result.score DESC;
 ```
+
+Require no more than ten rows, non-NULL scores, and passages joined to the intended table. Inspect `match_type` and both indexes: hybrid mode can fall back to one retrieval method when the other index is missing. `ctid` is a physical row version used only for this same-statement join, not a persistent identifier. Reranking is disabled, so no reranker registration is needed. Outer filters are post-retrieval and are not a replacement for access controls.
+
+## Preview and lifecycle notes
+
+Pipelines read HorizonDB tables; external content must first land in a staging table. Creation, runs, backfills, and other management operations require the primary endpoint and read-write transactions. Pipeline state is not portable across major `pg_durable` versions during preview; drain or pause running pipelines before upgrading.
+
+The lab intentionally leaves its objects available for inspection. Do not drop the pipeline while a run is active. Use the [documented lifecycle](https://learn.microsoft.com/en-us/azure/horizondb/ai/ai-pipelines#manage-the-pipeline-lifecycle) when finished, removing only objects created for your dedicated lab.
